@@ -5,21 +5,30 @@
  * @package   Better Font Awesome
  * @author    Mickey Kay <mickeykay.me>
  * @license   GPL-2.0+
- * @link      http://wordpress.org/plugins/better-font-awesome
+ * @link      https://wordpress.org/plugins/better-font-awesome/
  * @copyright 2017 Mickey Kay
  *
  * @wordpress-plugin
  * Plugin Name:       Better Font Awesome
- * Plugin URI:        http://wordpress.org/plugins/better-font-awesome
+ * Plugin URI:        https://github.com/MickeyKay/better-font-awesome
  * Description:       The ultimate Font Awesome icon plugin for WordPress.
- * Version:           2.0.4
+ * Version:           2.1.0
  * Author:            Mickey Kay
- * Author URI:        mickeyskay@gmail.com
+ * Author URI:        https://mickeykay.me/
  * License:           GPLv2+
+ * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
+ * Requires at least: 6.5
+ * Requires PHP:      7.4
  * Text Domain:       better-font-awesome
  * Domain Path:       /languages
  * GitHub Plugin URI: https://github.com/MickeyKay/better-font-awesome
  */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-better-font-awesome-metadata-manager.php';
 
 add_action( 'init', 'bfa_start', 5 );
 /**
@@ -59,7 +68,7 @@ class Better_Font_Awesome_Plugin {
 	 *
 	 * @var    string
 	 */
-	const VERSION = '2.0.4';
+	const VERSION = '2.1.0';
 
 	/**
 	 * The Better Font Awesome Library object.
@@ -75,9 +84,18 @@ class Better_Font_Awesome_Plugin {
 	 *
 	 * @since  0.1.0
 	 *
-	 * @var    Better_Font_Awesome_Library
+	 * @var    string
 	 */
 	private $bfa_lib_file_path;
+
+	/**
+	 * BFA-owned metadata manager.
+	 *
+	 * @since 2.0.4
+	 *
+	 * @var Better_Font_Awesome_Metadata_Manager|null
+	 */
+	private $metadata_manager;
 
 	/**
 	 * Plugin display name.
@@ -102,7 +120,7 @@ class Better_Font_Awesome_Plugin {
 	 *
 	 * @since  0.9.0
 	 *
-	 * @var    string
+	 * @var    array
 	 */
 	protected $options;
 
@@ -137,14 +155,13 @@ class Better_Font_Awesome_Plugin {
 	 *
 	 * @param array $args Args to instantiate BFA object.
 	 *
-	 * @return  Better_Font_Awesome  The BFA object.
+	 * @return  Better_Font_Awesome_Plugin  The BFA plugin object.
 	 */
 	public static function get_instance( $args = array() ) {
 
 		// If the single instance hasn't been set, set it now.
-		// phpcs:ignore WordPress.PHP.StrictComparisons.LooseComparison
-		if ( null == self::$instance ) {
-			self::$instance = new self( $args );
+		if ( null === self::$instance ) {
+			self::$instance = new self();
 		}
 
 		return self::$instance;
@@ -163,14 +180,23 @@ class Better_Font_Awesome_Plugin {
 		// Stop if the Better Font Awesome Library isn't included.
 		if ( ! $this->bfal_exists() ) {
 			add_action( 'admin_init', array( $this, 'deactivate' ) );
-			return false;
+			return;
 		}
 
 		// Include required files.
 		$this->includes();
 
+		// Prepare durable local metadata before BFAL resolves release data.
+		if ( $this->supports_async_metadata() ) {
+			$this->metadata_manager = new Better_Font_Awesome_Metadata_Manager();
+			$this->metadata_manager->boot();
+		}
+
 		// Initialize the Better Font Awesome Library.
 		$this->initialize_better_font_awesome_library( $this->options );
+		if ( $this->metadata_manager ) {
+			$this->metadata_manager->set_library( $this->bfa_lib );
+		}
 
 		// Load the plugin text domain.
 		$this->load_text_domain();
@@ -182,6 +208,40 @@ class Better_Font_Awesome_Plugin {
 
 		// Handle saving options via AJAX.
 		add_action( 'wp_ajax_bfa_save_options', array( $this, 'save_options' ) );
+
+		if ( is_multisite() && $this->metadata_manager && self::is_network_active() ) {
+			add_action( 'wp_initialize_site', array( __CLASS__, 'initialize_site_metadata' ) );
+		}
+	}
+
+	/**
+	 * Schedule metadata work for a new site only while BFA is network active.
+	 *
+	 * @param WP_Site $site New site.
+	 */
+	public static function initialize_site_metadata( $site ) {
+		if ( ! self::is_network_active() ) {
+			return;
+		}
+
+		Better_Font_Awesome_Metadata_Manager::initialize_site( $site );
+	}
+
+	/**
+	 * Check the current network's canonical plugin activation state.
+	 *
+	 * @return bool Whether BFA is active for the current network.
+	 */
+	private static function is_network_active() {
+		if ( ! is_multisite() ) {
+			return false;
+		}
+
+		if ( ! function_exists( 'is_plugin_active_for_network' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
+		return is_plugin_active_for_network( plugin_basename( __FILE__ ) );
 	}
 
 	/**
@@ -268,6 +328,53 @@ class Better_Font_Awesome_Plugin {
 	}
 
 	/**
+	 * Check whether the reviewed BFAL asynchronous metadata API is available.
+	 *
+	 * Keeping this compatibility check allows an emergency lockfile rollback to
+	 * BFAL 2.0.3 without making the plugin fail to load.
+	 *
+	 * @return bool Whether BFA can own metadata orchestration.
+	 */
+	private function supports_async_metadata() {
+		return self::dependency_supports_async_metadata();
+	}
+
+	/**
+	 * Check the installed BFAL package without constructing its singleton.
+	 *
+	 * Activation can run after the normal init hook has passed, so it cannot
+	 * assume the plugin constructor already loaded BFAL. Loading only the class
+	 * file allows lifecycle scheduling to fail closed in BFAL 2.0.3 rollback
+	 * mode without attempting the unsupported early-hook singleton workaround.
+	 *
+	 * @return bool Whether BFA can own asynchronous metadata orchestration.
+	 */
+	private static function dependency_supports_async_metadata() {
+		if ( ! class_exists( 'Better_Font_Awesome_Library', false ) ) {
+			$library_file = plugin_dir_path( __FILE__ ) . 'vendor/mickey-kay/better-font-awesome-library/better-font-awesome-library.php';
+			if ( ! is_readable( $library_file ) ) {
+				return false;
+			}
+			require_once $library_file;
+		}
+
+		if ( ! class_exists( 'Better_Font_Awesome_Release_Data_Validator' ) ) {
+			return false;
+		}
+
+		return method_exists( 'Better_Font_Awesome_Library', self::metadata_refresh_method_name() );
+	}
+
+	/**
+	 * Get the reviewed BFAL refresh method name.
+	 *
+	 * @return string BFAL method name.
+	 */
+	private static function metadata_refresh_method_name(): string {
+		return 'refresh_release_data';
+	}
+
+	/**
 	 * Get plugin options, or initialize with default values.
 	 *
 	 * @since   0.10.0
@@ -281,10 +388,12 @@ class Better_Font_Awesome_Plugin {
 		 * Run maybe_unserialize() in case we're updating from the old
 		 * serialized Titan Framwork option to a new, array-based options.
 		 */
-		$this->options = maybe_unserialize( get_option( $option_name ) );
+		$options       = maybe_unserialize( get_option( $option_name ) );
+		$this->options = is_array( $options ) ? $options : array();
 
 		// Initialize the plugin options with defaults if they're not set.
 		if ( empty( $this->options ) ) {
+			$this->options = $this->option_defaults;
 			update_option( $option_name, $this->option_defaults );
 		}
 
@@ -309,8 +418,7 @@ class Better_Font_Awesome_Plugin {
 	private function initialize_better_font_awesome_library( $options ) {
 
 		// Hide admin notices if setting is checked.
-		// phpcs:ignore WordPress.PHP.StrictComparisons.LooseComparison
-		if ( $options && true == $options['hide_admin_notices'] ) {
+		if ( ! empty( $options['hide_admin_notices'] ) ) {
 			add_filter( 'bfa_show_errors', '__return_false' );
 		}
 
@@ -323,6 +431,11 @@ class Better_Font_Awesome_Plugin {
 			'load_shortcode'      => true,
 			'load_tinymce_plugin' => true,
 		);
+
+		if ( $this->metadata_manager ) {
+			$args['release_data_provider']         = array( $this->metadata_manager, 'provide_release_data' );
+			$args['release_data_refresh_callback'] = array( $this->metadata_manager, 'request_release_data_refresh' );
+		}
 
 		$this->bfa_lib = Better_Font_Awesome_Library::get_instance( $args );
 	}
@@ -387,8 +500,8 @@ class Better_Font_Awesome_Plugin {
 
 		add_settings_section(
 			'settings_section_primary', // ID.
-			null, // Title.
-			null, // Callback.
+			'', // Title.
+			'__return_null', // Callback.
 			self::SLUG // Page.
 		);
 
@@ -487,17 +600,26 @@ class Better_Font_Awesome_Plugin {
 	 * @since  1.0.10
 	 */
 	public function save_options() {
-		if ( false == check_ajax_referer( self::SLUG . '-options', 'bfa_nonce', false ) ) {
+		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_die(
-				__( 'Settings were not saved due to a missing nonce. Refresh the page and try again.', 'better-font-awesome' ),
-				403
+				esc_html__( 'You are not allowed to change these settings.', 'better-font-awesome' ),
+				'',
+				array( 'response' => 403 )
+			);
+		}
+
+		if ( false === check_ajax_referer( self::SLUG . '-options', 'bfa_nonce', false ) ) {
+			wp_die(
+				esc_html__( 'Settings were not saved due to a missing nonce. Refresh the page and try again.', 'better-font-awesome' ),
+				'',
+				array( 'response' => 403 )
 			);
 		}
 
 		$options = array(
-			'include_v4_shim'    => isset( $_POST['include_v4_shim'] ) && $_POST['include_v4_shim'],
-			'remove_existing_fa' => isset( $_POST['remove_existing_fa'] ) && $_POST['remove_existing_fa'],
-			'hide_admin_notices' => isset( $_POST['hide_admin_notices'] ) && $_POST['hide_admin_notices'],
+			'include_v4_shim'    => isset( $_POST['include_v4_shim'] ) && (bool) absint( wp_unslash( $_POST['include_v4_shim'] ) ),
+			'remove_existing_fa' => isset( $_POST['remove_existing_fa'] ) && (bool) absint( wp_unslash( $_POST['remove_existing_fa'] ) ),
+			'hide_admin_notices' => isset( $_POST['hide_admin_notices'] ) && (bool) absint( wp_unslash( $_POST['hide_admin_notices'] ) ),
 		);
 
 		// Sanitize and update the options.
@@ -507,6 +629,28 @@ class Better_Font_Awesome_Plugin {
 		esc_html_e( 'Settings saved.', 'better-font-awesome' );
 
 		wp_die();
+	}
+
+	/**
+	 * Schedule metadata work when the plugin is activated.
+	 *
+	 * @param bool $network_wide Whether activation is network-wide.
+	 */
+	public static function activate( $network_wide = false ) {
+		if ( ! self::dependency_supports_async_metadata() ) {
+			return;
+		}
+
+		Better_Font_Awesome_Metadata_Manager::activate( $network_wide );
+	}
+
+	/**
+	 * Stop pending metadata work while preserving durable data.
+	 *
+	 * @param bool $network_wide Whether deactivation is network-wide.
+	 */
+	public static function deactivate_metadata( $network_wide = false ) {
+		Better_Font_Awesome_Metadata_Manager::deactivate( $network_wide );
 	}
 
 	/**
@@ -584,5 +728,7 @@ class Better_Font_Awesome_Plugin {
 
 		return $new_input;
 	}
-
 }
+
+register_activation_hook( __FILE__, array( 'Better_Font_Awesome_Plugin', 'activate' ) );
+register_deactivation_hook( __FILE__, array( 'Better_Font_Awesome_Plugin', 'deactivate_metadata' ) );
