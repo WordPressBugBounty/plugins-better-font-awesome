@@ -12,7 +12,7 @@
  * Plugin Name:       Better Font Awesome
  * Plugin URI:        https://github.com/MickeyKay/better-font-awesome
  * Description:       The ultimate Font Awesome icon plugin for WordPress.
- * Version:           2.1.0
+ * Version:           3.0.0
  * Author:            Mickey Kay
  * Author URI:        https://mickeykay.me/
  * License:           GPLv2+
@@ -68,7 +68,7 @@ class Better_Font_Awesome_Plugin {
 	 *
 	 * @var    string
 	 */
-	const VERSION = '2.1.0';
+	const VERSION = '3.0.0';
 
 	/**
 	 * The Better Font Awesome Library object.
@@ -96,6 +96,15 @@ class Better_Font_Awesome_Plugin {
 	 * @var Better_Font_Awesome_Metadata_Manager|null
 	 */
 	private $metadata_manager;
+
+	/**
+	 * Native icon block controller.
+	 *
+	 * @since 2.2.0
+	 *
+	 * @var Better_Font_Awesome_Icon_Block|null
+	 */
+	private $icon_block;
 
 	/**
 	 * Plugin display name.
@@ -189,14 +198,18 @@ class Better_Font_Awesome_Plugin {
 		// Prepare durable local metadata before BFAL resolves release data.
 		if ( $this->supports_async_metadata() ) {
 			$this->metadata_manager = new Better_Font_Awesome_Metadata_Manager();
-			$this->metadata_manager->boot();
 		}
 
 		// Initialize the Better Font Awesome Library.
 		$this->initialize_better_font_awesome_library( $this->options );
 		if ( $this->metadata_manager ) {
 			$this->metadata_manager->set_library( $this->bfa_lib );
+			$this->metadata_manager->boot();
 		}
+
+		// Register the native dynamic icon block without changing shortcodes.
+		$this->icon_block = new Better_Font_Awesome_Icon_Block( $this->bfa_lib );
+		$this->icon_block->boot();
 
 		// Load the plugin text domain.
 		$this->load_text_domain();
@@ -325,13 +338,16 @@ class Better_Font_Awesome_Plugin {
 
 		// Better Font Awesome Library.
 		require_once $this->bfa_lib_file_path;
+
+		// Better Font Awesome native icon block.
+		require_once plugin_dir_path( __FILE__ ) . 'includes/class-better-font-awesome-icon-block.php';
 	}
 
 	/**
 	 * Check whether the reviewed BFAL asynchronous metadata API is available.
 	 *
 	 * Keeping this compatibility check allows an emergency lockfile rollback to
-	 * BFAL 2.0.3 without making the plugin fail to load.
+	 * BFAL 2.1.0 without making the plugin fail to load.
 	 *
 	 * @return bool Whether BFA can own metadata orchestration.
 	 */
@@ -344,7 +360,7 @@ class Better_Font_Awesome_Plugin {
 	 *
 	 * Activation can run after the normal init hook has passed, so it cannot
 	 * assume the plugin constructor already loaded BFAL. Loading only the class
-	 * file allows lifecycle scheduling to fail closed in BFAL 2.0.3 rollback
+	 * file allows lifecycle scheduling to fail closed in BFAL 2.1.0 rollback
 	 * mode without attempting the unsupported early-hook singleton workaround.
 	 *
 	 * @return bool Whether BFA can own asynchronous metadata orchestration.
